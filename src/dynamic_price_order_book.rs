@@ -46,7 +46,7 @@ impl TOrderBook for DynamicPriceOrderBook {
         Err(OrderBookError::Other("Not implemented yet".into()))
     }
 
-    fn rest_remaining_limit_order(&mut self, order: Order, partially_filled: bool) -> Result<(), OrderBookError> {
+    fn rest_remaining_limit_order(&mut self, order_index: Order, partially_filled: bool) -> Result<(), OrderBookError> {
         Err(OrderBookError::Other("Not implemented yet".into()))
     }
 

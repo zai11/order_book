@@ -10,7 +10,7 @@ pub trait TOrderBook {
     fn fill_immediate_or_cancel_order(&mut self, order: &mut Order) -> Result<Vec<OrderFill>, OrderBookError>;
     fn fill_fill_or_kill_order(&mut self, order: &mut Order) -> Result<Vec<OrderFill>, OrderBookError>;
     fn match_order_against_book(&mut self, aggressive_order: &mut Order, start_index: usize, end_index: usize) -> Result<Vec<OrderFill>, OrderBookError>;
-    fn rest_remaining_limit_order(&mut self, order: Order, partially_filled: bool) -> Result<(), OrderBookError>;
+    fn rest_remaining_limit_order(&mut self, order_index: Order, partially_filled: bool) -> Result<(), OrderBookError>;
     fn recalculate_best_bid(&mut self, order_price: u32) -> Result<(), OrderBookError>;
     fn recalculate_best_ask(&mut self, order_price: u32) -> Result<(), OrderBookError>;
     

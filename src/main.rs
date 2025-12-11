@@ -23,6 +23,7 @@ fn check_add_order_latencies() {
         min_price: 0,
         max_price: 1_000_00,
         tick_size: 1,
+        queue_size: 100
     };
 
     let mut order_book = FixedPriceOrderBook::new(config);
