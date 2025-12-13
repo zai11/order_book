@@ -4,8 +4,6 @@ A high-performance, concurrent order book engine written in Rust, focused on ach
 
 This project is primarily an exploration of data-structure design, cache locality, and hot-path optimisation.
 
----
-
 ## Performance Results
 
 Performance is reported separately for a single order book and for the multi-symbol order book manager, to make the cost of symbol routing and concurrent map access explicit.
@@ -46,8 +44,6 @@ These measurements include:
 - DashMap shard locking
 - Per-symbol order book access
 - Order matching and/or resting logic
-
----
 
 ## Core Design
 
@@ -106,8 +102,6 @@ This setup reflects the tight price clustering seen in liquid equity markets, ra
 - **RAM:** 32 GB DDR4 (8533 MT/s)
 - **OS:** Windows
 - Hooked to Rust `release` builds with optimisations enabled
-
----
 
 ## Summary
 
