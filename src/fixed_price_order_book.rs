@@ -271,8 +271,6 @@ impl TOrderBook for FixedPriceOrderBook {
             match match_side {
                 OrderSide::Buy => {
                     let end_index = self.best_bid_index.unwrap_or(end_index);
-                    //println!("{} price levels could be checked at worst case", end_index - start_index);
-                    let mut empty_queues = 0;
                     for i in (start_index..=end_index).rev() {
                         if aggressive_order.quantity == 0 {
                             break;
@@ -280,7 +278,6 @@ impl TOrderBook for FixedPriceOrderBook {
 
                         let queue_option = self.bids.get_mut(i);
                         if queue_option.is_none() {
-                            empty_queues += 1;
                             continue;
                         }
                         let mut queue = std::mem::take(queue_option.unwrap());
@@ -292,14 +289,9 @@ impl TOrderBook for FixedPriceOrderBook {
 
                         self.bids[i] = queue;
                     }
-                    if empty_queues > 0 {
-                        println!("{empty_queues} empty queues were encountered.");
-                    }
                 },
                 OrderSide::Sell => {
                     let start_index = self.best_ask_index.unwrap_or(start_index);
-                    //println!("{} price levels could be checked at worst case", end_index - start_index);
-                    let mut empty_queues = 0;
                     for i in start_index..=end_index {
                         if aggressive_order.quantity == 0 {
                             break;
@@ -307,7 +299,6 @@ impl TOrderBook for FixedPriceOrderBook {
 
                         let queue_option = self.asks.get_mut(i);
                         if queue_option.is_none() {
-                            empty_queues += 1;
                             continue;
                         }
 
@@ -319,9 +310,6 @@ impl TOrderBook for FixedPriceOrderBook {
                         }
 
                         self.asks[i] = queue;
-                    }
-                    if empty_queues > 0 {
-                        println!("{empty_queues} empty queues were encountered.");
                     }
                 }
             }
@@ -624,7 +612,7 @@ mod tests {
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
-        let mut order = Order {
+        let order = Order {
             order_id: 0,
             order_type: OrderType::Limit,
             order_status: OrderStatus::PendingNew,
@@ -639,8 +627,6 @@ mod tests {
         let add_order_result = order_book.add_order(order.clone());
 
         let order_index = order_book.index_mappings[&order.order_id];
-
-        order.order_status = OrderStatus::Active;
 
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);

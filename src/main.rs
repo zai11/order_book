@@ -3,6 +3,7 @@ use std::{collections::HashSet, time::Instant};
 use rust_decimal::{Decimal, dec, prelude::FromPrimitive};
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand_distr::{Normal, Distribution};
 
 use crate::{enums::{order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, fixed_price_order_book::FixedPriceOrderBook, models::{fixed_price_order_book_config::FixedPriceOrderBookConfig, order::Order}, traits::order_book::TOrderBook};
 
@@ -21,40 +22,38 @@ fn main() {
 fn check_add_order_latencies() {
     let config = FixedPriceOrderBookConfig {
         min_price: 0,
-        max_price: 1_000_00,
+        max_price: 10_000_00,
         tick_size: 1,
-        queue_size: 100
+        queue_size: 1000,
     };
 
     let mut order_book = FixedPriceOrderBook::new(config);
 
     let num_orders = 1_000_000;
-    let price_levels = 1_000;
     let base_ticks = 5000; // ~ $50.00 midpoint
 
     let mut rng = StdRng::seed_from_u64(12345);
 
-    // -------------------------------------------------
-    // Pre-create all Order structs and track prices
-    // -------------------------------------------------
-    let mut orders = Vec::with_capacity(num_orders);
+    // Gaussian around base_ticks with std deviation ~10 ticks
+    let normal = Normal::new(base_ticks as f64, 10.0).unwrap();
 
+    // Pre-create all orders and track price levels
+    let mut orders = Vec::with_capacity(num_orders);
     let mut min_tick = i32::MAX;
     let mut max_tick = i32::MIN;
     let mut tick_set = HashSet::<i32>::new();
 
     for i in 0..num_orders {
-        let side = if rng.random::<bool>() {
+        let side = if rng.random_bool(0.5) {
             OrderSide::Buy
         } else {
             OrderSide::Sell
         };
 
-        let offset: i32 =
-            rng.random_range(-price_levels as i32 / 2 .. price_levels as i32 / 2);
-
-        let price_ticks = (base_ticks as i32 + offset).max(1);
-        let price = (base_ticks as i32 + offset).max(1) as u32;
+        // Generate Gaussian price offset
+        let mut price_ticks = normal.sample(&mut rng).round() as i32;
+        price_ticks = price_ticks.max(1); // Ensure price >= 1
+        let price = price_ticks as u32;
 
         let qty = rng.random_range(1..1000);
 
@@ -82,11 +81,7 @@ fn check_add_order_latencies() {
         Decimal::from_i32(max_tick).unwrap() * dec!(0.01)
     );
 
-    // -------------------------------------------------
-    // Benchmark with latency collection
-    // -------------------------------------------------
     let mut latencies = Vec::with_capacity(num_orders);
-
     let total_start = Instant::now();
 
     for order in orders {
@@ -97,11 +92,8 @@ fn check_add_order_latencies() {
     }
 
     let total_end = Instant::now();
-
-    // -------------------------------------------------
-    // Compute percentiles
-    // -------------------------------------------------
     latencies.sort_unstable();
+
 
     println!("\nLatency Statistics:");
     benchmark_percentiles("fill_order", std::mem::take(&mut order_book.bench_stats.fill_order));
