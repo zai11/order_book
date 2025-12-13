@@ -5,14 +5,11 @@ use rust_decimal::{Decimal, dec, prelude::FromPrimitive};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{Normal, Distribution};
 
-use crate::{enums::{order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, fixed_price_order_book::FixedPriceOrderBook, models::{fixed_price_order_book_config::FixedPriceOrderBookConfig, order::Order}, traits::order_book::TOrderBook};
+use crate::{enums::{order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, models::{order::Order, order_book_config::OrderBookConfig}, order_book::OrderBook};
 
-pub mod dynamic_price_order_book;
 pub mod enums;
-pub mod fixed_price_order_book;
-pub mod macros;
 pub mod models;
-pub mod traits;
+pub mod order_book;
 pub mod utils;
 
 fn main() {
@@ -20,14 +17,14 @@ fn main() {
 }
 
 fn check_add_order_latencies() {
-    let config = FixedPriceOrderBookConfig {
+    let config = OrderBookConfig {
         min_price: 0,
         max_price: 10_000_00,
         tick_size: 1,
         queue_size: 1000,
     };
 
-    let mut order_book = FixedPriceOrderBook::new(config);
+    let mut order_book = OrderBook::new(config);
 
     let num_orders = 1_000_000;
     let base_ticks = 5000; // ~ $50.00 midpoint
@@ -94,40 +91,13 @@ fn check_add_order_latencies() {
     let total_end = Instant::now();
     latencies.sort_unstable();
 
+    let n = latencies.len();
+    let p50 = latencies[n * 50 / 100];
+    let p90 = latencies[n * 90 / 100];
+    let p99 = latencies[n * 99 / 100];
+    let avg = latencies.iter().sum::<u64>() / n as u64;
 
     println!("\nLatency Statistics:");
-    benchmark_percentiles("fill_order", std::mem::take(&mut order_book.bench_stats.fill_order));
-    benchmark_percentiles("add_order", std::mem::take(&mut order_book.bench_stats.add_order));
-    benchmark_percentiles("execute_fill_by_order_type", std::mem::take(&mut order_book.bench_stats.execute_fill_by_order_type));
-
-    benchmark_percentiles("fill_limit_order", std::mem::take(&mut order_book.bench_stats.fill_limit_order));
-    benchmark_percentiles("fill_market_order", std::mem::take(&mut order_book.bench_stats.fill_market_order));
-    benchmark_percentiles("fill_immediate_or_cancel_order", std::mem::take(&mut order_book.bench_stats.fill_immediate_or_cancel_order));
-    benchmark_percentiles("fill_fill_or_kill_order", std::mem::take(&mut order_book.bench_stats.fill_fill_or_kill_order));
-
-    benchmark_percentiles("match_order_against_book", std::mem::take(&mut order_book.bench_stats.match_order_against_book));
-    benchmark_percentiles("rest_remaining_limit_order", std::mem::take(&mut order_book.bench_stats.rest_remaining_limit_order));
-    benchmark_percentiles("can_fill_completely", std::mem::take(&mut order_book.bench_stats.can_fill_completely));
-
+    println!("p50: {p50}ns\tp90: {p90}ns\tp99: {p99}ns\tavg: {avg}ns\tsamples: {n}");
     println!("Total time elapsed: {}ms", (total_end - total_start).as_millis());
-}
-
-fn benchmark_percentiles(name: &str, mut data: Vec<u64>) {
-    if data.is_empty() {
-        println!("{}: no samples", name);
-        return;
-    }
-
-    data.sort_unstable();
-
-    let n = data.len();
-    let p50 = data[n * 50 / 100];
-    let p90 = data[n * 90 / 100];
-    let p99 = data[n * 99 / 100];
-    let avg = data.iter().sum::<u64>() / n as u64;
-
-    println!(
-        "{:<32}  p50: {:>6} ns  p90: {:>6} ns  p99: {:>6} ns  avg: {:>6} ns  samples: {}",
-        name, p50, p90, p99, avg, n
-    );
 }
