@@ -1,14 +1,16 @@
 use std::{collections::{HashMap, VecDeque}, vec};
 
 use rust_decimal::{prelude::ToPrimitive};
+use slab::Slab;
 
 use crate::{enums::{order_book_errors::OrderBookError, order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, models::{bench_stats::BenchStats, fixed_price_order_book_config::FixedPriceOrderBookConfig, order::Order, order_fill::OrderFill}, traits::order_book::TOrderBook, utils::get_timestamp};
 
 pub struct FixedPriceOrderBook {
     pub config: FixedPriceOrderBookConfig,
-    pub bids: Vec<VecDeque<Order>>,
-    pub asks: Vec<VecDeque<Order>>,
-    pub order_ledger: HashMap<u64, Order>,  // Key = order_id, Value = (Order, queue_index)
+    pub bids: Vec<VecDeque<usize>>,         // Stores an index of order_ledger
+    pub asks: Vec<VecDeque<usize>>,         // ""
+    pub order_ledger: Slab<Order>,
+    pub index_mappings: HashMap<u64, usize>,       // <order_id, ledger_index>
     pub trade_history: Vec<OrderFill>,
     pub best_bid_index: Option<usize>,
     pub best_ask_index: Option<usize>,
@@ -24,14 +26,14 @@ impl FixedPriceOrderBook {
         let mut bids = vec![];
         for _ in 0..(vec_capacity + 1) {
             let mut queue = VecDeque::new();
-            queue.reserve(100);
+            queue.reserve(config.queue_size);
             bids.push(queue);
         }
 
         let mut asks = vec![];
         for _ in 0..(vec_capacity + 1) {
             let mut queue = VecDeque::new();
-            queue.reserve(100);
+            queue.reserve(config.queue_size);
             asks.push(queue);
         }
 
@@ -39,7 +41,8 @@ impl FixedPriceOrderBook {
             config,
             bids,
             asks,
-            order_ledger: HashMap::new(),
+            order_ledger: Slab::new(),
+            index_mappings: HashMap::new(),
             trade_history: vec![],
             best_bid_index: None,
             best_ask_index: None,
@@ -48,50 +51,62 @@ impl FixedPriceOrderBook {
     }
     
     #[inline(never)]
-    pub fn fill_order(&mut self, queue: &mut VecDeque<Order>, aggressive_order: &mut Order, resting_order: &mut Order, fills: &mut Vec<OrderFill>) -> Result<bool, OrderBookError> {
+    pub fn fill_order(&mut self, queue: &mut VecDeque<usize>, aggressive_order: &mut Order, resting_order_index: usize, fills: &mut Vec<OrderFill>) -> Result<bool, OrderBookError> {
         crate::time_func!(self.bench_stats.fill_order, {
-            if resting_order.quantity == aggressive_order.quantity {
-                let fill = OrderFill {
-                    aggressive_order_id: aggressive_order.order_id,
-                    resting_order_id: resting_order.order_id,
-                    price: resting_order.price,
-                    quantity: resting_order.quantity as u32,
-                    timestamp: get_timestamp()
-                };
-                fills.push(fill);
-                self.order_ledger.remove(&resting_order.order_id);  
-                aggressive_order.quantity -= resting_order.quantity;
-                return Ok(true);
-            }
-            else if resting_order.quantity > aggressive_order.quantity {
-                let fill = OrderFill {
-                    aggressive_order_id: aggressive_order.order_id,
-                    resting_order_id: resting_order.order_id,
-                    price: resting_order.price,
-                    quantity: aggressive_order.quantity as u32,
-                    timestamp: get_timestamp()
-                };
-                fills.push(fill);
-                resting_order.quantity -= aggressive_order.quantity;
-                queue.push_front(resting_order.to_owned());
-                self.order_ledger.insert(resting_order.order_id, resting_order.to_owned());
-                aggressive_order.quantity = 0;
-                return Ok(true);
-            }
-            else {
-                let fill = OrderFill {
-                    aggressive_order_id: aggressive_order.order_id,
-                    resting_order_id: resting_order.order_id,
-                    price: resting_order.price,
-                    quantity: resting_order.quantity as u32,
-                    timestamp: get_timestamp()
-                };
-                fills.push(fill);
-                aggressive_order.quantity -= resting_order.quantity; 
-                self.order_ledger.remove(&resting_order.order_id);
+
+            let mut remove_resting_order = false;
+            let mut filled_order = false;
+
+            {
+                let resting_order = self.order_ledger.get_mut(resting_order_index)
+                    .ok_or(OrderBookError::OrderNotFound)?;
+
+                if resting_order.quantity == aggressive_order.quantity {
+                    let fill = OrderFill {
+                        aggressive_order_id: aggressive_order.order_id,
+                        resting_order_id: resting_order.order_id,
+                        price: resting_order.price,
+                        quantity: resting_order.quantity as u32,
+                        timestamp: get_timestamp()
+                    };
+                    fills.push(fill);
+                    remove_resting_order = true;
+                    aggressive_order.quantity -= resting_order.quantity;
+                    filled_order = true;
+                }
+                else if resting_order.quantity > aggressive_order.quantity {
+                    let fill = OrderFill {
+                        aggressive_order_id: aggressive_order.order_id,
+                        resting_order_id: resting_order.order_id,
+                        price: resting_order.price,
+                        quantity: aggressive_order.quantity as u32,
+                        timestamp: get_timestamp()
+                    };
+                    fills.push(fill);
+                    resting_order.quantity -= aggressive_order.quantity;
+                    queue.push_front(resting_order_index);
+                    aggressive_order.quantity = 0;
+                    filled_order = true;
+                }
+                else {
+                    let fill = OrderFill {
+                        aggressive_order_id: aggressive_order.order_id,
+                        resting_order_id: resting_order.order_id,
+                        price: resting_order.price,
+                        quantity: resting_order.quantity as u32,
+                        timestamp: get_timestamp()
+                    };
+                    fills.push(fill);
+                    aggressive_order.quantity -= resting_order.quantity; 
+                    remove_resting_order = true;
+                }
             }
 
-            Ok(false)
+            if remove_resting_order {
+                self.order_ledger.remove(resting_order_index);  
+            }
+
+            Ok(filled_order)
         })
     }
 }
@@ -111,11 +126,13 @@ impl TOrderBook for FixedPriceOrderBook {
     }
 
     fn cancel_order(&mut self, order_id: u64) -> Result<(), OrderBookError> {
-        if !self.order_ledger.contains_key(&order_id) {
+        if !self.order_ledger.iter().any(|(_, order)| order.order_id == order_id) {
             return Err(OrderBookError::OrderNotFound);
         }
 
-        let order = &self.order_ledger[&order_id];
+        let ledger_index = self.index_mappings[&order_id];
+
+        let order = &self.order_ledger[ledger_index];
         if order.price as usize >= self.bids.len() {
             return Err(OrderBookError::PriceOutOfRange);
         }
@@ -123,8 +140,8 @@ impl TOrderBook for FixedPriceOrderBook {
         match order.order_side {
             OrderSide::Buy => {
                 if let Some(queue) = self.bids.get_mut(order.price as usize) {
-                    queue.retain(|o| o.order_id != order_id);
-                    self.order_ledger.remove(&order_id);
+                    queue.retain(|&idx| idx != ledger_index);
+                    self.order_ledger.remove(ledger_index);
                 }
                 else {
                     return Err(OrderBookError::OrderNotFound);
@@ -132,8 +149,8 @@ impl TOrderBook for FixedPriceOrderBook {
             },
             OrderSide::Sell => {
                 if let Some(queue) = self.asks.get_mut(order.price as usize) {
-                    queue.retain(|o| o.order_id != order_id);
-                    self.order_ledger.remove(&order_id);
+                    queue.retain(|&idx| idx != ledger_index);
+                    self.order_ledger.remove(ledger_index);
                 }
                 else {
                     return Err(OrderBookError::OrderNotFound);
@@ -243,6 +260,7 @@ impl TOrderBook for FixedPriceOrderBook {
     fn match_order_against_book(&mut self, aggressive_order: &mut Order, start_index: usize, end_index: usize) -> Result<Vec<OrderFill>, OrderBookError> {
         crate::time_func!(self.bench_stats.match_order_against_book, {
             let mut fills = Vec::new();
+
             let match_side = if aggressive_order.order_side == OrderSide::Buy {
                 OrderSide::Sell
             }
@@ -268,8 +286,8 @@ impl TOrderBook for FixedPriceOrderBook {
                         let mut queue = std::mem::take(queue_option.unwrap());
 
                         while aggressive_order.quantity > 0 && !queue.is_empty() {
-                            let mut resting_order = queue.pop_front().unwrap();
-                            let _filled = self.fill_order(&mut queue, aggressive_order, &mut resting_order, &mut fills)?;
+                            let resting_order_index = queue.pop_front().unwrap();
+                            let _filled = self.fill_order(&mut queue, aggressive_order, resting_order_index, &mut fills)?;
                         }
 
                         self.bids[i] = queue;
@@ -296,8 +314,8 @@ impl TOrderBook for FixedPriceOrderBook {
                         let mut queue = std::mem::take(queue_option.unwrap());
 
                         while aggressive_order.quantity > 0 && !queue.is_empty() {
-                            let mut resting_order = queue.pop_front().unwrap();
-                            let _filled = self.fill_order(&mut queue, aggressive_order, &mut resting_order, &mut fills)?;
+                            let resting_order = queue.pop_front().unwrap();
+                            let _filled = self.fill_order(&mut queue, aggressive_order, resting_order, &mut fills)?;
                         }
 
                         self.asks[i] = queue;
@@ -330,27 +348,37 @@ impl TOrderBook for FixedPriceOrderBook {
                 OrderSide::Buy => {
                     self.recalculate_best_bid(order.price)?;
                     if let Some(queue) = self.bids.get_mut(order.price as usize) {
-                        queue.push_back(order.clone());
-                        self.order_ledger.insert(order.order_id, order);
+                        let order_id = order.order_id;
+                        let order_index = self.order_ledger.insert(order);
+                        queue.push_back(order_index);
+                        self.index_mappings.insert(order_id, order_index);
                     }
                     else {
+                        let order_id = order.order_id;
+                        let order_price = order.price;
+                        let order_index = self.order_ledger.insert(order);
                         let mut queue = VecDeque::new();
-                        queue.push_back(order.clone());
-                        self.bids.insert(order.price as usize, queue);
-                        self.order_ledger.insert(order.order_id, order);
+                        queue.push_back(order_index);
+                        self.bids.insert(order_price as usize, queue);
+                        self.index_mappings.insert(order_id, order_index);
                     }
                 },
                 OrderSide::Sell => {
                     self.recalculate_best_ask(order.price)?;
                     if let Some(queue) = self.asks.get_mut(order.price as usize) {
-                        queue.push_back(order.clone());
-                        self.order_ledger.insert(order.order_id, order);
+                        let order_id = order.order_id;
+                        let order_index = self.order_ledger.insert(order);
+                        queue.push_back(order_index);
+                        self.index_mappings.insert(order_id, order_index);
                     }
                     else {
+                        let order_id = order.order_id;
+                        let order_price = order.price;
+                        let order_index = self.order_ledger.insert(order);
                         let mut queue = VecDeque::new();
-                        queue.push_back(order.clone());
-                        self.asks.insert(order.price as usize, queue);
-                        self.order_ledger.insert(order.order_id, order);
+                        queue.push_back(order_index);
+                        self.asks.insert(order_price as usize, queue);
+                        self.index_mappings.insert(order_id, order_index);
                     }
                 }
             }
@@ -405,7 +433,7 @@ impl TOrderBook for FixedPriceOrderBook {
                 OrderSide::Buy => {
                     for i in 0..=order.price as usize {
                         let queue = &self.asks[i];
-                        available_quantity += queue.iter().map(|o| o.quantity as u32).sum::<u32>();
+                        available_quantity += queue.iter().map(|&idx| self.order_ledger[idx].quantity as u32).sum::<u32>();
                         if available_quantity >= order.quantity as u32 {
                             return Ok(true);
                         }
@@ -414,7 +442,7 @@ impl TOrderBook for FixedPriceOrderBook {
                 OrderSide::Sell => {
                     for i in (order.price as usize..self.bids.len()).rev() {
                         let queue = &self.bids[i];
-                        available_quantity += queue.iter().map(|o| o.quantity as u32).sum::<u32>();
+                        available_quantity += queue.iter().map(|&idx| self.order_ledger[idx].quantity as u32).sum::<u32>();
                         if available_quantity >= order.quantity as u32 {
                             return Ok(true);
                         }
@@ -437,11 +465,12 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
-        let mut sell_order = Order {
+        let sell_order = Order {
             order_id: 0,
             order_type: OrderType::Limit,
             order_status: OrderStatus::Active,
@@ -463,15 +492,16 @@ mod tests {
 
         let price_index = sell_order.price as usize;
 
-        order_book.asks[price_index].push_back(sell_order.clone());
-        order_book.order_ledger.insert(sell_order.order_id, sell_order.clone());
+
+        let sell_order_index = order_book.order_ledger.insert(sell_order.clone());
+        order_book.asks[price_index].push_back(sell_order_index);
 
         let mut queue = order_book.asks[price_index].clone();
         let mut fills = Vec::new();
 
         queue.pop_front();
 
-        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, &mut sell_order, &mut fills);
+        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, sell_order_index, &mut fills);
 
         assert!(fill_order_result.is_ok());
         assert!(fill_order_result.unwrap());
@@ -486,11 +516,12 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
-        let mut sell_order = Order {
+        let sell_order = Order {
             order_id: 0,
             order_type: OrderType::Limit,
             order_status: OrderStatus::Active,
@@ -512,21 +543,21 @@ mod tests {
 
         let price_index = sell_order.price as usize;
 
-        order_book.asks[price_index].push_back(sell_order.clone());
-        order_book.order_ledger.insert(sell_order.order_id, sell_order.clone());
+        let sell_order_index = order_book.order_ledger.insert(sell_order.clone());
+        order_book.asks[price_index].push_back(sell_order_index);
 
         let mut queue = order_book.asks[price_index].clone();
         let mut fills = Vec::new();
 
         queue.pop_front();
 
-        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, &mut sell_order, &mut fills);
+        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, sell_order_index, &mut fills);
 
         assert!(fill_order_result.is_ok());
         assert!(fill_order_result.unwrap());
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0], sell_order);
-        assert_eq!(queue[0].quantity, 500);
+        assert_eq!(queue[0], sell_order_index);
+        assert_eq!(order_book.order_ledger[sell_order_index].quantity, 500);
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].aggressive_order_id, buy_order.order_id);
         assert_eq!(fills[0].resting_order_id, sell_order.order_id);
@@ -537,11 +568,12 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
-        let mut sell_order = Order {
+        let sell_order = Order {
             order_id: 0,
             order_type: OrderType::Limit,
             order_status: OrderStatus::Active,
@@ -563,15 +595,15 @@ mod tests {
 
         let price_index = sell_order.price as usize;
 
-        order_book.asks[price_index].push_back(sell_order.clone());
-        order_book.order_ledger.insert(sell_order.order_id, sell_order.clone());
+        let sell_order_index = order_book.order_ledger.insert(sell_order.clone());
+        order_book.asks[price_index].push_back(sell_order_index);
 
         let mut queue = order_book.asks[price_index].clone();
         let mut fills = Vec::new();
 
         queue.pop_front();
 
-        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, &mut sell_order, &mut fills);
+        let fill_order_result = order_book.fill_order(&mut queue, &mut buy_order, sell_order_index, &mut fills);
 
         assert!(fill_order_result.is_ok());
         assert!(!fill_order_result.unwrap());
@@ -587,7 +619,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -605,11 +638,13 @@ mod tests {
 
         let add_order_result = order_book.add_order(order.clone());
 
+        let order_index = order_book.index_mappings[&order.order_id];
+
         order.order_status = OrderStatus::Active;
 
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
     }
 
     #[test]
@@ -617,7 +652,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -637,9 +673,11 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_sell_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let buy_order = Order {
             order_id: 1,
@@ -662,7 +700,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -682,9 +721,11 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_sell_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let mut buy_order = Order {
             order_id: 1,
@@ -701,10 +742,12 @@ mod tests {
         buy_order.order_status = OrderStatus::PartiallyFilled;
         buy_order.quantity = 200;
 
+        let buy_order_index = order_book.index_mappings[&buy_order.order_id];
+
         assert!(add_buy_order_result.is_ok());
         assert!(order_book.asks[price_index].is_empty());
         assert_eq!(order_book.bids[price_index].len(), 1);
-        assert_eq!(order_book.bids[price_index][0], buy_order);
+        assert_eq!(order_book.bids[price_index][0], buy_order_index);
     }
 
     #[test]
@@ -712,7 +755,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -737,7 +781,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -757,9 +802,11 @@ mod tests {
 
         order.order_status = OrderStatus::Active;
 
+        let order_index = order_book.index_mappings[&order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
 
         let cancel_order_result = order_book.cancel_order(order.order_id);
 
@@ -772,7 +819,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -792,16 +840,18 @@ mod tests {
 
         order.order_status = OrderStatus::Active;
 
+        let order_index = order_book.index_mappings[&order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
 
         let cancel_order_result = order_book.cancel_order(99);
 
         assert!(cancel_order_result.is_err());
         assert_eq!(cancel_order_result.err().unwrap(), OrderBookError::OrderNotFound);
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
     }
 
     #[test]
@@ -809,7 +859,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -825,16 +876,17 @@ mod tests {
 
         let price_index = order.price as usize;
 
+        
+        let order_index = order_book.order_ledger.insert(order.clone());
         order_book.asks.extend([const { VecDeque::new() }; 10000]);
-        order_book.asks[price_index].push_back(order.clone());
-        order_book.order_ledger.insert(order.order_id, order.clone());
+        order_book.asks[price_index].push_back(order_index);
 
         let cancel_order_result = order_book.cancel_order(99);
 
         assert!(cancel_order_result.is_err());
         assert_eq!(cancel_order_result.err().unwrap(), OrderBookError::OrderNotFound);
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
     }
 
     #[test]
@@ -842,7 +894,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -862,18 +915,22 @@ mod tests {
 
         order.order_status = OrderStatus::Active;
 
+        let order_index = order_book.index_mappings[&order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], order);
+        assert_eq!(order_book.asks[price_index][0], order_index);
 
         let mut modified_order = order.clone();
         modified_order.quantity = 500;
 
         let modify_order_result = order_book.modify_order(order.order_id, modified_order.clone());
 
+        let buy_order_index = order_book.index_mappings[&order.order_id];
+
         assert!(modify_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], modified_order);
+        assert_eq!(order_book.order_ledger[buy_order_index], modified_order);
     }
 
     #[test]
@@ -881,7 +938,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -911,9 +969,11 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
@@ -931,7 +991,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -961,15 +1022,19 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
+        let buy_order_index = order_book.index_mappings[&buy_order.order_id];
+
         assert!(execute_fill_by_order_type_result.is_ok());
         assert_eq!(order_book.bids[price_index].len(), 1);
-        assert_eq!(order_book.bids[price_index][0].quantity, 300);
+        assert_eq!(order_book.order_ledger[buy_order_index].quantity, 300);
         assert!(order_book.asks[price_index].is_empty());
         assert_eq!(order_book.trade_history.len(), 1);
         assert_eq!(order_book.trade_history[0].aggressive_order_id, buy_order.order_id);
@@ -982,7 +1047,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1012,15 +1078,17 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
         assert!(execute_fill_by_order_type_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0].quantity, 300);
+        assert_eq!(order_book.order_ledger[sell_order_index].quantity, 300);
         assert!(order_book.bids[price_index].is_empty());
         assert_eq!(order_book.trade_history.len(), 1);
         assert_eq!(order_book.trade_history[0].aggressive_order_id, buy_order.order_id);
@@ -1033,7 +1101,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1063,9 +1132,11 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
@@ -1084,7 +1155,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1114,15 +1186,17 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
         assert!(execute_fill_by_order_type_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0].quantity, 300);
+        assert_eq!(order_book.order_ledger[sell_order_index].quantity, 300);
         assert!(order_book.bids[price_index].is_empty());
         assert_eq!(order_book.trade_history.len(), 1);
         assert_eq!(order_book.trade_history[0].aggressive_order_id, buy_order.order_id);
@@ -1135,7 +1209,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1164,7 +1239,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1194,15 +1270,17 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
         assert!(execute_fill_by_order_type_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0].quantity, 300);
+        assert_eq!(order_book.order_ledger[sell_order_index].quantity, 300);
         assert!(order_book.bids[price_index].is_empty());
         assert_eq!(order_book.trade_history.len(), 1);
         assert_eq!(order_book.trade_history[0].aggressive_order_id, buy_order.order_id);
@@ -1215,7 +1293,8 @@ mod tests {
         let config = FixedPriceOrderBookConfig {
             min_price: 0,
             max_price: 10000,
-            tick_size: 1
+            tick_size: 1,
+            queue_size: 100
         };
         let mut order_book = FixedPriceOrderBook::new(config);
 
@@ -1245,16 +1324,18 @@ mod tests {
 
         sell_order.order_status = OrderStatus::Active;
 
+        let sell_order_index = order_book.index_mappings[&sell_order.order_id];
+
         assert!(add_order_result.is_ok());
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0], sell_order);
+        assert_eq!(order_book.asks[price_index][0], sell_order_index);
 
         let execute_fill_by_order_type_result = order_book.execute_fill_by_order_type(buy_order.clone());
 
         assert!(execute_fill_by_order_type_result.is_err());
         assert_eq!(execute_fill_by_order_type_result.err().unwrap(), OrderBookError::CannotFillCompletely);
         assert_eq!(order_book.asks[price_index].len(), 1);
-        assert_eq!(order_book.asks[price_index][0].quantity, 300);
+        assert_eq!(order_book.order_ledger[sell_order_index].quantity, 300);
         assert!(order_book.bids[price_index].is_empty());
         assert!(order_book.trade_history.is_empty());
     }
