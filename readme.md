@@ -1,4 +1,4 @@
-# Ultra-Low Latency Rust Order Book Engine
+# Low Latency Rust Order Book Engine
 
 A high-performance, concurrent order book engine written in Rust, focused on achieving sub-microsecond order processing latencies.
 
