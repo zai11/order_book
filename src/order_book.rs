@@ -1,6 +1,5 @@
 use std::{collections::{HashMap, VecDeque}, vec};
 
-use rust_decimal::{prelude::ToPrimitive};
 use slab::Slab;
 
 use crate::{enums::{order_book_errors::OrderBookError, order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, models::{bench_stats::BenchStats, order::Order, order_book_config::{OrderBookConfig}, order_fill::OrderFill}, utils::get_timestamp};
@@ -19,9 +18,7 @@ pub struct OrderBook {
 
 impl OrderBook {
     pub fn new(config: OrderBookConfig) -> Self {
-        let vec_capacity = ((config.max_price - config.min_price) / config.tick_size)
-            .to_u64()
-            .ok_or(OrderBookError::Other("Unable to convert index to u64.".into())).unwrap() as usize;
+        let vec_capacity = ((config.max_price - config.min_price) / config.tick_size) as usize;
 
         let mut bids = vec![];
         for _ in 0..(vec_capacity + 1) {

@@ -1,7 +1,5 @@
 use std::{collections::HashSet, time::Instant};
 
-use rust_decimal::{Decimal, dec, prelude::FromPrimitive};
-
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{Normal, Distribution};
 
@@ -74,8 +72,8 @@ fn check_add_order_latencies() {
     println!("Total distinct price levels: {}", tick_set.len());
     println!(
         "Approx. price range: ${:.2} → ${:.2}",
-        Decimal::from_i32(min_tick).unwrap() * dec!(0.01),
-        Decimal::from_i32(max_tick).unwrap() * dec!(0.01)
+        min_tick as f32 * 0.01,
+        max_tick as f32 * 0.01
     );
 
     let mut latencies = Vec::with_capacity(num_orders);

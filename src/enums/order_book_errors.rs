@@ -1,10 +1,8 @@
 use std::fmt::{Display, Debug};
 
-use rust_decimal::Decimal;
-
 #[derive(PartialEq, Eq)]
 pub enum OrderBookError {
-    InvalidTick(Decimal),
+    InvalidTick(u32),
     PriceOutOfRange,
     OrderNotFound,
     NonLimitOrderRestAttempt,
