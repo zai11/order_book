@@ -14,9 +14,9 @@ Benchmarked using 1,000,000 orders on a single order book, with prices sampled f
 
 ```
 p50: 100ns
-p90: 300ns
-p99: 500ns
-avg: 242ns
+p90: 200ns
+p99: 400ns
+avg: 195ns
 samples: 1,000,000
 ```
 
