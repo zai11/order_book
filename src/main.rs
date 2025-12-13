@@ -3,10 +3,11 @@ use std::{collections::HashSet, time::Instant};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{Normal, Distribution};
 
-use crate::{enums::{order_side::OrderSide, order_status::OrderStatus, order_type::OrderType}, models::{order::Order, order_book_config::OrderBookConfig}, order_book::OrderBook};
+use crate::{enums::{order_side::OrderSide, order_status::OrderStatus, order_type::OrderType, symbol::Symbol}, models::{order::Order, order_book_config::OrderBookConfig}, order_book_manager::OrderBookManager};
 
 pub mod enums;
 pub mod models;
+pub mod order_book_manager;
 pub mod order_book;
 pub mod utils;
 
@@ -15,14 +16,37 @@ fn main() {
 }
 
 fn check_add_order_latencies() {
+    // Configuration - same for all symbols for simplicity
     let config = OrderBookConfig {
         min_price: 0,
         max_price: 10_000_00,
         tick_size: 1,
-        queue_size: 1000,
+        queue_size: 100,
     };
 
-    let mut order_book = OrderBook::new(config);
+    let mut manager = OrderBookManager::new();
+    
+    // Define symbols to benchmark
+    let symbols = vec![
+        Symbol::AAPL, 
+        Symbol::MSFT, 
+        Symbol::GOOGL, 
+        Symbol::AMZN, 
+        Symbol::TSLA,
+        Symbol::META, 
+        Symbol::NVDA, 
+        Symbol::AMD, 
+        Symbol::INTC, 
+        Symbol::NFLX,
+    ];
+    
+    // Add all symbols to manager
+    for symbol in &symbols {
+        println!("Adding symbol: {}", symbol);
+        manager.add_symbol(symbol.clone(), config.clone());
+    }
+    
+    println!("Benchmarking {} symbols", symbols.len());
 
     let num_orders = 1_000_000;
     let base_ticks = 5000; // ~ $50.00 midpoint
@@ -37,6 +61,7 @@ fn check_add_order_latencies() {
     let mut min_tick = i32::MAX;
     let mut max_tick = i32::MIN;
     let mut tick_set = HashSet::<i32>::new();
+    let mut symbol_counts = vec![0; symbols.len()];
 
     for i in 0..num_orders {
         let side = if rng.random_bool(0.5) {
@@ -51,13 +76,18 @@ fn check_add_order_latencies() {
         let price = price_ticks as u32;
 
         let qty = rng.random_range(1..1000);
+        
+        // Randomly select symbol (uniform distribution across symbols)
+        let symbol_idx = rng.random_range(0..symbols.len());
+        let symbol = symbols[symbol_idx].clone();
+        symbol_counts[symbol_idx] += 1;
 
         // Track price-level range
         min_tick = min_tick.min(price_ticks);
         max_tick = max_tick.max(price_ticks);
         tick_set.insert(price_ticks);
 
-        orders.push(Order {
+        orders.push((symbol, Order {
             order_id: i as u64,
             order_type: OrderType::Limit,
             order_status: OrderStatus::PendingNew,
@@ -65,7 +95,7 @@ fn check_add_order_latencies() {
             user_id: rng.random_range(0..1000),
             price,
             quantity: qty,
-        });
+        }));
     }
 
     println!("Price tick range: {} → {}", min_tick, max_tick);
@@ -75,13 +105,22 @@ fn check_add_order_latencies() {
         min_tick as f32 * 0.01,
         max_tick as f32 * 0.01
     );
+    
+    println!("\nOrders per symbol:");
+    for (i, symbol) in symbols.iter().enumerate() {
+        println!("  {}: {} orders ({:.1}%)", 
+            symbol, 
+            symbol_counts[i],
+            100.0 * symbol_counts[i] as f64 / num_orders as f64
+        );
+    }
 
     let mut latencies = Vec::with_capacity(num_orders);
     let total_start = Instant::now();
 
-    for order in orders {
+    for (symbol, order) in orders {
         let start = Instant::now();
-        order_book.add_order(order).unwrap();
+        manager.add_order(symbol, order).unwrap();
         let end = Instant::now();
         latencies.push((end - start).as_nanos() as u64);
     }
