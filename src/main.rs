@@ -1,3 +1,6 @@
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+
 use std::{collections::HashSet, time::Instant};
 
 use rust_decimal::{Decimal, dec, prelude::FromPrimitive};
@@ -21,16 +24,16 @@ fn main() {
 fn check_add_order_latencies() {
     let config = FixedPriceOrderBookConfig {
         min_price: 0,
-        max_price: 1_000_00,
+        max_price: 1_000,
         tick_size: 1,
-        queue_size: 100
+        buf_size: 1024
     };
 
-    let mut order_book = FixedPriceOrderBook::new(config);
+    let mut order_book: FixedPriceOrderBook<1_000, 1_024> = FixedPriceOrderBook::new(config).unwrap();
 
     let num_orders = 1_000_000;
     let price_levels = 1_000;
-    let base_ticks = 5000; // ~ $50.00 midpoint
+    let base_ticks = 50; // ~ $50.00 midpoint
 
     let mut rng = StdRng::seed_from_u64(12345);
 
